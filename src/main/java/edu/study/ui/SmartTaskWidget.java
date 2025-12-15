@@ -10,11 +10,13 @@ import edu.study.model.Task;
 import edu.study.model.TaskStatus;
 import edu.study.util.DateTimeUtil;
 import edu.study.util.SettingsStore;
+import edu.study.util.ToolSandboxRunner;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
+import java.nio.file.Paths;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
@@ -82,6 +84,10 @@ public class SmartTaskWidget {
     private final double rightPanelWidth = 320;
     private final PersonalProfile profile = new PersonalProfile();
     private final ExecutorService llmExecutor = Executors.newSingleThreadExecutor();
+    private final ToolSandboxRunner sandboxRunner = new ToolSandboxRunner(Paths.get(System.getProperty("user.dir"), "Tools"));
+    private VBox sandboxPane;
+    private javafx.scene.control.ListView<String> jarListView;
+    private javafx.scene.control.TextArea sandboxLog;
 
     public SmartTaskWidget(TaskController controller, AssistantAPI assistantAPI, ChatClient chatClient) {
         this.controller = controller;
@@ -102,15 +108,23 @@ public class SmartTaskWidget {
         nowTaskButtonLabel = new Label();
 
         BorderPane wrapper = new BorderPane();
-        VBox content = new VBox(10, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar(), buildChatPane());
-        content.setPadding(new Insets(10));
+        sandboxPane = new VBox();
+        sandboxPane.setVisible(false);
+        sandboxPane.setManaged(false);
+        sandboxPane.setPrefWidth(280);
+
+        VBox mainContent = new VBox(10, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar(), buildChatPane());
+        mainContent.setPadding(new Insets(10));
         VBox.setVgrow(calendarBox, javafx.scene.layout.Priority.ALWAYS);
         VBox.setVgrow(unscheduledList, javafx.scene.layout.Priority.ALWAYS);
         double totalWidth = axisWidth + 7 * (columnWidth + 8) + rightPanelWidth + 60;
         double totalHeight = dayHeight() + 300;
-        content.setPrefWidth(totalWidth);
-        content.setPrefHeight(totalHeight);
-        wrapper.setCenter(content);
+        mainContent.setPrefWidth(totalWidth);
+        mainContent.setPrefHeight(totalHeight);
+
+        HBox container = new HBox(10, mainContent, sandboxPane);
+        HBox.setHgrow(mainContent, javafx.scene.layout.Priority.ALWAYS);
+        wrapper.setCenter(container);
         wrapper.setBottom(buildFooter());
 
         refreshList();
@@ -127,9 +141,12 @@ public class SmartTaskWidget {
         minimize.setPrefWidth(30);
         Button settings = new Button("设置");
         settings.setOnAction(e -> showSettingsDialog());
+        Button sandboxToggle = new Button("沙盒");
+        sandboxToggle.setOnAction(e -> toggleSandbox());
+        sandboxToggle.setTooltip(new Tooltip("显示/隐藏编程沙盒（Tools目录下的jar）"));
 
         Region spacer = new Region();
-        HBox header = new HBox(10, title, spacer, settings, minimize);
+        HBox header = new HBox(10, title, spacer, sandboxToggle, settings, minimize);
         HBox.setHgrow(spacer, javafx.scene.layout.Priority.ALWAYS);
         header.setAlignment(Pos.CENTER_LEFT);
         return header;
@@ -767,6 +784,68 @@ public class SmartTaskWidget {
         HBox inputRow = new HBox(8, chatInput, send);
         HBox.setHgrow(chatInput, javafx.scene.layout.Priority.ALWAYS);
         return new VBox(6, chatLabel, chatHistory, inputRow);
+    }
+
+    private void toggleSandbox() {
+        if (sandboxPane.getChildren().isEmpty()) {
+            sandboxPane.getChildren().setAll(buildSandboxPane());
+        }
+        boolean visible = !sandboxPane.isVisible();
+        sandboxPane.setVisible(visible);
+        sandboxPane.setManaged(visible);
+        if (!visible) {
+            sandboxPane.setPrefWidth(0);
+        } else {
+            sandboxPane.setPrefWidth(280);
+        }
+        if (visible) {
+            refreshSandboxList();
+        }
+    }
+
+    private Node buildSandboxPane() {
+        Label title = new Label("编程沙盒（Tools目录下的jar）");
+        title.setStyle("-fx-text-fill: #e0e0e0; -fx-font-weight: bold;");
+
+        jarListView = new ListView<>();
+        jarListView.setStyle("-fx-control-inner-background: #000000; -fx-text-fill: #e0e0e0;");
+        jarListView.setPrefHeight(140);
+
+        Button refresh = new Button("刷新");
+        refresh.setOnAction(e -> refreshSandboxList());
+        Button run = new Button("运行所选");
+        run.setOnAction(e -> {
+            String jar = jarListView.getSelectionModel().getSelectedItem();
+            if (jar == null || jar.isBlank()) {
+                appendSandboxLog("[warn] 未选择程序");
+                return;
+            }
+            appendSandboxLog("[run] java -jar " + jar);
+            sandboxRunner.runJar(jar, line -> javafx.application.Platform.runLater(() -> appendSandboxLog(line)));
+        });
+        HBox actions = new HBox(8, refresh, run);
+
+        sandboxLog = new TextArea();
+        sandboxLog.setEditable(false);
+        sandboxLog.setWrapText(true);
+        sandboxLog.setPrefHeight(140);
+        sandboxLog.setStyle("-fx-control-inner-background: #000000; -fx-text-fill: #00ff66; -fx-font-family: Consolas, monospace;");
+
+        VBox box = new VBox(8, title, jarListView, actions, sandboxLog);
+        box.setStyle("-fx-background-color: #000000; -fx-padding: 8;");
+        return box;
+    }
+
+    private void refreshSandboxList() {
+        List<String> jars = sandboxRunner.listJars();
+        jarListView.getItems().setAll(jars);
+        appendSandboxLog("[info] 已加载 " + jars.size() + " 个jar");
+    }
+
+    private void appendSandboxLog(String line) {
+        if (sandboxLog != null) {
+            sandboxLog.appendText(line + "\n");
+        }
     }
 
     private void showSettingsDialog() {
