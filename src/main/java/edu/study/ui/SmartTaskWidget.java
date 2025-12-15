@@ -1,21 +1,27 @@
 ﻿package edu.study.ui;
 
 import edu.study.api.AssistantAPI;
+import edu.study.api.ChatClient;
 import edu.study.controller.TaskController;
+import edu.study.model.PersonalProfile;
 import edu.study.model.Priority;
+import edu.study.model.SettingsConfig;
 import edu.study.model.Task;
 import edu.study.model.TaskStatus;
 import edu.study.util.DateTimeUtil;
+import edu.study.util.SettingsStore;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.collections.FXCollections;
@@ -25,20 +31,21 @@ import javafx.scene.Node;
 import javafx.scene.SnapshotParameters;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.DatePicker;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.control.Separator;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.SpinnerValueFactory;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
-import javafx.scene.control.ButtonType;
-import javafx.scene.control.Separator;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.DragEvent;
 import javafx.scene.input.Dragboard;
@@ -49,13 +56,13 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
-import javafx.scene.control.ScrollPane;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
 
 public class SmartTaskWidget {
     private final TaskController controller;
     private final AssistantAPI assistantAPI;
+    private final ChatClient chatClient;
     private ListView<Task> unscheduledList;
     private HBox calendarBox;
     private Label statsLabel;
@@ -71,16 +78,20 @@ public class SmartTaskWidget {
     private Timeline refreshTimeline;
     private final double columnWidth = 150;
     private final double axisWidth = 60;
-    private final double morningCompress = 0.25; // 0-8 点压缩比例
+    private final double morningCompress = 0.25;// 0-8 点压缩比例
     private final double rightPanelWidth = 320;
+    private final PersonalProfile profile = new PersonalProfile();
+    private final ExecutorService llmExecutor = Executors.newSingleThreadExecutor();
 
-    public SmartTaskWidget(TaskController controller, AssistantAPI assistantAPI) {
+    public SmartTaskWidget(TaskController controller, AssistantAPI assistantAPI, ChatClient chatClient) {
         this.controller = controller;
         this.assistantAPI = assistantAPI;
+        this.chatClient = chatClient;
     }
 
     public BorderPane build(Stage stage) {
         this.ownerStage = stage;
+        loadSettings();
         unscheduledList = new ListView<>();
         unscheduledList.setCellFactory(lv -> new UnscheduledTaskCell());
         calendarBox = new HBox(8);
@@ -91,7 +102,7 @@ public class SmartTaskWidget {
         nowTaskButtonLabel = new Label();
 
         BorderPane wrapper = new BorderPane();
-        VBox content = new VBox(10, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar());
+        VBox content = new VBox(10, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar(), buildChatPane());
         content.setPadding(new Insets(10));
         VBox.setVgrow(calendarBox, javafx.scene.layout.Priority.ALWAYS);
         VBox.setVgrow(unscheduledList, javafx.scene.layout.Priority.ALWAYS);
@@ -185,9 +196,17 @@ public class SmartTaskWidget {
         input.setPromptText("用自然语言快速记录 (例: 这周准备线代期中)");
         Button parseBtn = new Button("智能拆分");
         parseBtn.setOnAction(e -> {
-            assistantAPI.addTaskFromNaturalLanguage(input.getText());
-            input.clear();
-            refreshList();
+            String text = input.getText();
+            if (text == null || text.isBlank()) {
+                return;
+            }
+            llmExecutor.submit(() -> {
+                assistantAPI.addTaskFromNaturalLanguage(text);
+                javafx.application.Platform.runLater(() -> {
+                    input.clear();
+                    refreshList();
+                });
+            });
         });
         HBox box = new HBox(8, input, parseBtn);
         HBox.setHgrow(input, javafx.scene.layout.Priority.ALWAYS);
@@ -711,6 +730,45 @@ public class SmartTaskWidget {
         return task.getEstimatedTime() != null ? task.getEstimatedTime() : Duration.ofHours(1);
     }
 
+    private Node buildChatPane() {
+        Label chatLabel = new Label("与个人助手聊天");
+        TextArea chatHistory = new TextArea();
+        chatHistory.setEditable(false);
+        chatHistory.setWrapText(true);
+        chatHistory.setPrefHeight(150);
+
+        TextField chatInput = new TextField();
+        chatInput.setPromptText("输入想聊的内容，例如：帮我规划明天的学习安排");
+        Button send = new Button("发送");
+        send.setOnAction(e -> {
+            String msg = chatInput.getText();
+            if (msg == null || msg.isBlank()) {
+                return;
+            }
+            chatHistory.appendText("你：" + msg + "\n");
+            chatInput.clear();
+            List<Task> all = controller.listTasks();
+            llmExecutor.submit(() -> {
+                chatClient.chat(msg, all, profile).ifPresentOrElse(
+                        r -> javafx.application.Platform.runLater(() -> {
+                            if (r.startsWith("SET:")) {
+                                String nl = r.substring(4).trim();
+                                assistantAPI.addTaskFromNaturalLanguage(nl);
+                                refreshList();
+                                chatHistory.appendText("助手: 已根据指令创建/更新任务。\n");
+                            } else {
+                                chatHistory.appendText("助手: " + r + "\n");
+                            }
+                        }),
+                        () -> javafx.application.Platform.runLater(() -> chatHistory.appendText("助手: 未找到相关任务或指令。\n"))
+                );
+            });
+        });
+        HBox inputRow = new HBox(8, chatInput, send);
+        HBox.setHgrow(chatInput, javafx.scene.layout.Priority.ALWAYS);
+        return new VBox(6, chatLabel, chatHistory, inputRow);
+    }
+
     private void showSettingsDialog() {
         Dialog<Void> dialog = new Dialog<>();
         dialog.setTitle("设置");
@@ -719,8 +777,13 @@ public class SmartTaskWidget {
             dialog.initModality(Modality.WINDOW_MODAL);
         }
 
-        Spinner<Integer> pxSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(12, 80, (int) pxPerHour));
+                Spinner<Integer> pxSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(12, 80, (int) pxPerHour));
         Spinner<Integer> refreshSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(10, 300, refreshSeconds));
+        TextField nameField = new TextField(profile.getName());
+        TextField majorField = new TextField(profile.getMajor());
+        TextField goalField = new TextField(profile.getGoal());
+        TextArea noteArea = new TextArea(profile.getNote());
+        noteArea.setPrefRowCount(3);
         Button resetBtn = new Button("清空数据");
         resetBtn.setOnAction(e -> {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "确认清空所有数据并重置？", ButtonType.OK, ButtonType.CANCEL);
@@ -736,6 +799,9 @@ public class SmartTaskWidget {
         VBox body = new VBox(10,
                 new HBox(8, new Label("每小时像素"), pxSpinner),
                 new HBox(8, new Label("刷新间隔(秒)"), refreshSpinner),
+                new HBox(8, new Label("姓名"), nameField, new Label("专业"), majorField),
+                new HBox(8, new Label("目标"), goalField),
+                new VBox(4, new Label("备注"), noteArea),
                 new Separator(),
                 resetBtn
         );
@@ -746,12 +812,56 @@ public class SmartTaskWidget {
             if (btn == ButtonType.OK) {
                 pxPerHour = pxSpinner.getValue();
                 refreshSeconds = refreshSpinner.getValue();
+                profile.setName(nameField.getText());
+                profile.setMajor(majorField.getText());
+                profile.setGoal(goalField.getText());
+                profile.setNote(noteArea.getText());
                 startAutoRefresh();
                 refreshList();
+                saveSettings();
             }
             return null;
         });
         dialog.showAndWait();
     }
-}
 
+    private void loadSettings() {
+        SettingsConfig cfg = SettingsStore.load();
+        if (cfg != null) {
+            if (cfg.getPxPerHour() > 0) {
+                pxPerHour = cfg.getPxPerHour();
+            }
+            if (cfg.getRefreshSeconds() > 0) {
+                refreshSeconds = cfg.getRefreshSeconds();
+            }
+            PersonalProfile p = cfg.getProfile();
+            if (p != null) {
+                profile.setName(p.getName());
+                profile.setMajor(p.getMajor());
+                profile.setGoal(p.getGoal());
+                profile.setNote(p.getNote());
+            }
+        }
+    }
+
+    private void saveSettings() {
+        SettingsConfig cfg = new SettingsConfig();
+        cfg.setPxPerHour(pxPerHour);
+        cfg.setRefreshSeconds(refreshSeconds);
+        PersonalProfile copy = new PersonalProfile();
+        copy.setName(profile.getName());
+        copy.setMajor(profile.getMajor());
+        copy.setGoal(profile.getGoal());
+        copy.setNote(profile.getNote());
+        cfg.setProfile(copy);
+        SettingsStore.save(cfg);
+    }
+
+    public void shutdown() {
+        if (refreshTimeline != null) {
+            refreshTimeline.stop();
+        }
+        llmExecutor.shutdownNow();
+        saveSettings();
+    }
+}

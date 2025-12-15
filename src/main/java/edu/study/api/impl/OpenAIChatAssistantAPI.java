@@ -5,6 +5,7 @@ import edu.study.api.AssistantAPI;
 import edu.study.model.Priority;
 import edu.study.model.Task;
 import edu.study.service.TaskService;
+import edu.study.util.LlmLogger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -38,9 +39,9 @@ public class OpenAIChatAssistantAPI implements AssistantAPI {
         this.taskService = taskService;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl != null && !baseUrl.isBlank() ? baseUrl : "https://api.openai.com/v1";
-        this.model = model != null && !model.isBlank() ? model : "gpt-3.5-turbo";
+        this.model = model != null && !model.isBlank() ? model : "gpt-4o";
         this.client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
+                .connectTimeout(Duration.ofSeconds(15))
                 .build();
         this.mapper = new ObjectMapper();
         this.fallback = new RuleBasedAssistantAPI(taskService);
@@ -86,7 +87,6 @@ public class OpenAIChatAssistantAPI implements AssistantAPI {
             Map<String, Object> body = new HashMap<>();
             body.put("model", model);
             body.put("temperature", 0.3);
-            body.put("max_tokens", maxTokens);
             List<Map<String, String>> messages = new ArrayList<>();
             messages.add(message("system", "You help students plan study tasks. Reply concisely in Chinese."));
             messages.add(message("user", prompt));
@@ -94,11 +94,11 @@ public class OpenAIChatAssistantAPI implements AssistantAPI {
 
             String payload = mapper.writeValueAsString(body);
             log("LLM request => model=" + model + " url=" + baseUrl + "/chat/completions"
-                    + " maxTokens=" + maxTokens + " prompt=" + truncate(prompt, 800)
+                    + " prompt=" + truncate(prompt, 800)
                     + " payload=" + truncate(payload, 800));
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl.replaceAll("/$", "") + "/chat/completions"))
-                    .timeout(Duration.ofSeconds(20))
+                    .timeout(Duration.ofSeconds(60))
                     .header("Content-Type", "application/json")
                     .header("Authorization", "Bearer " + apiKey)
                     .POST(HttpRequest.BodyPublishers.ofString(payload))
@@ -106,19 +106,24 @@ public class OpenAIChatAssistantAPI implements AssistantAPI {
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 String finishReason = extractFinishReason(response.body());
-                log("LLM response status=" + response.statusCode() + " finish_reason=" + finishReason
-                        + " body=" + truncate(response.body()));
+                log("LLM response status=" + response.statusCode() + " finish_reason=" + finishReason);
+                LlmLogger.log("assistant", payload, response.body());
                 String content = extractContent(response.body());
                 if (content == null || content.isBlank()) {
-                    log("LLM response empty content. finish_reason=" + finishReason + " body=" + truncate(response.body()));
+                    log("LLM response empty content. finish_reason=" + finishReason);
                     return Optional.empty();
                 }
                 return Optional.of(content);
             } else {
-                log("LLM HTTP error code=" + response.statusCode() + " body=" + truncate(response.body()));
+                log("LLM HTTP error code=" + response.statusCode());
+                LlmLogger.log("assistant-error", payload, response.body());
             }
         } catch (Exception e) {
             log("LLM call failed: " + e.getMessage());
+            try {
+                LlmLogger.log("assistant-error", "exception", e.toString());
+            } catch (Exception ignored) {
+            }
         }
         return Optional.empty();
     }

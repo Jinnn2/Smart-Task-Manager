@@ -68,6 +68,10 @@ public class TaskController {
         return taskService.tasksWithoutSchedule();
     }
 
+    public List<Task> listTasks() {
+        return taskService.listTasks();
+    }
+
     public void shutdown() {
         taskService.refreshStatuses();
         taskService.persist();

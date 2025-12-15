@@ -16,4 +16,5 @@ module edu.study {
 
     opens edu.study.model to com.fasterxml.jackson.databind;
     opens edu.study.repository to com.fasterxml.jackson.databind;
+    opens edu.study.util to com.fasterxml.jackson.databind;
 }

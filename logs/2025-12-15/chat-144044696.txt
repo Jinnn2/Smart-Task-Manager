@@ -1,0 +1,5 @@
+Prompt:
+帮我规划明天的学习安排
+
+Response:
+{"id":"chatcmpl-CmwY8bsmx8sCNK8Ou6s0FuEWOETp8","choices":[{"index":0,"message":{"role":"assistant","content":"明天的学习安排可以这样进行：\n\n1. 上午：专注于准备好物理资料。这是一个高优先级的任务，尽量早上完成，以充分利用早上的高效学习时间。\n\n2. 下午：继续深入学习中等优先级的学习任务，可以适当复习之前的知识，或者开始新的学习内容。\n\n3. 晚上7点，要记得去吃火锅。留出足够的时间，确保这个关键任务不会被错过。\n\n学习之间可以适当安排休息时间，确保精力充沛。","annotations":[]},"logprobs":null,"finish_reason":"stop"}],"created":1765780844,"model":"gpt-4o-2024-08-06","object":"chat.completion","usage":{"prompt_tokens":247,"completion_tokens":125,"total_tokens":372,"completion_tokens_details":{"audio_tokens":0,"reasoning_tokens":0},"prompt_tokens_details":{"audio_tokens":0,"cached_tokens":0}},"system_fingerprint":"fp_4a331a0222"}
