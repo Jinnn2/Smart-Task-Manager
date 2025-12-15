@@ -1,0 +1,757 @@
+﻿package edu.study.ui;
+
+import edu.study.api.AssistantAPI;
+import edu.study.controller.TaskController;
+import edu.study.model.Priority;
+import edu.study.model.Task;
+import edu.study.model.TaskStatus;
+import edu.study.util.DateTimeUtil;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
+import java.util.Comparator;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
+import javafx.collections.FXCollections;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.Node;
+import javafx.scene.SnapshotParameters;
+import javafx.scene.control.Alert;
+import javafx.scene.control.Button;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.DatePicker;
+import javafx.scene.control.Dialog;
+import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
+import javafx.scene.control.ListView;
+import javafx.scene.control.Spinner;
+import javafx.scene.control.SpinnerValueFactory;
+import javafx.scene.control.SplitPane;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
+import javafx.scene.control.ButtonType;
+import javafx.scene.control.Separator;
+import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.DragEvent;
+import javafx.scene.input.Dragboard;
+import javafx.scene.input.MouseEvent;
+import javafx.scene.input.TransferMode;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Pane;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import javafx.scene.control.ScrollPane;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
+
+public class SmartTaskWidget {
+    private final TaskController controller;
+    private final AssistantAPI assistantAPI;
+    private ListView<Task> unscheduledList;
+    private HBox calendarBox;
+    private Label statsLabel;
+    private Label warningLabel;
+    private Label nowTaskButtonLabel;
+    private double dragOffsetX;
+    private double dragOffsetY;
+    private Stage ownerStage;
+    private Task draggingTask;
+    private LocalDate weekStart = LocalDate.now();
+    private double pxPerHour = 24;
+    private int refreshSeconds = 45;
+    private Timeline refreshTimeline;
+    private final double columnWidth = 150;
+    private final double axisWidth = 60;
+    private final double morningCompress = 0.25; // 0-8 点压缩比例
+    private final double rightPanelWidth = 320;
+
+    public SmartTaskWidget(TaskController controller, AssistantAPI assistantAPI) {
+        this.controller = controller;
+        this.assistantAPI = assistantAPI;
+    }
+
+    public BorderPane build(Stage stage) {
+        this.ownerStage = stage;
+        unscheduledList = new ListView<>();
+        unscheduledList.setCellFactory(lv -> new UnscheduledTaskCell());
+        calendarBox = new HBox(8);
+        calendarBox.setFillHeight(true);
+        statsLabel = new Label();
+        warningLabel = new Label();
+        warningLabel.setStyle("-fx-text-fill: red; -fx-font-weight: bold;");
+        nowTaskButtonLabel = new Label();
+
+        BorderPane wrapper = new BorderPane();
+        VBox content = new VBox(10, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar());
+        content.setPadding(new Insets(10));
+        VBox.setVgrow(calendarBox, javafx.scene.layout.Priority.ALWAYS);
+        VBox.setVgrow(unscheduledList, javafx.scene.layout.Priority.ALWAYS);
+        double totalWidth = axisWidth + 7 * (columnWidth + 8) + rightPanelWidth + 60;
+        double totalHeight = dayHeight() + 300;
+        content.setPrefWidth(totalWidth);
+        content.setPrefHeight(totalHeight);
+        wrapper.setCenter(content);
+        wrapper.setBottom(buildFooter());
+
+        refreshList();
+        startAutoRefresh();
+        enableDragging(stage, wrapper);
+        return wrapper;
+    }
+
+    private Node buildHeader(Stage stage) {
+        Label title = new Label("Smart Study Task Manager");
+        title.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
+        Button minimize = new Button("_");
+        minimize.setOnAction(e -> stage.setIconified(true));
+        minimize.setPrefWidth(30);
+        Button settings = new Button("设置");
+        settings.setOnAction(e -> showSettingsDialog());
+
+        Region spacer = new Region();
+        HBox header = new HBox(10, title, spacer, settings, minimize);
+        HBox.setHgrow(spacer, javafx.scene.layout.Priority.ALWAYS);
+        header.setAlignment(Pos.CENTER_LEFT);
+        return header;
+    }
+
+    private Node buildForm() {
+        TextField titleField = new TextField();
+        titleField.setPromptText("任务标题");
+
+        TextField descriptionField = new TextField();
+        descriptionField.setPromptText("描述");
+
+        ComboBox<Priority> priorityBox = new ComboBox<>(FXCollections.observableArrayList(Priority.values()));
+        priorityBox.getSelectionModel().select(Priority.MEDIUM);
+        priorityBox.setPrefWidth(120);
+
+        DatePicker startPicker = new DatePicker(LocalDate.now());
+        Spinner<Integer> startHour = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(0, 23, 8));
+        startHour.setPrefWidth(70);
+
+        DatePicker deadlinePicker = new DatePicker(LocalDate.now().plusDays(1));
+        Spinner<Integer> deadlineHour = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(0, 23, 23));
+        deadlineHour.setPrefWidth(70);
+
+        Spinner<Integer> durationSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(1, 24, 2));
+        durationSpinner.setPrefWidth(70);
+
+        Button addBtn = new Button("添加");
+        addBtn.setOnAction(e -> {
+            String title = titleField.getText();
+            if (title == null || title.isBlank()) {
+                showAlert("请输入任务标题");
+                return;
+            }
+            LocalDate deadlineDate = deadlinePicker.getValue();
+            if (deadlineDate == null) {
+                showAlert("请选择截止日期");
+                return;
+            }
+            LocalDateTime startTime = null;
+            if (startPicker.getValue() != null) {
+                startTime = LocalDateTime.of(startPicker.getValue(), LocalTime.of(startHour.getValue(), 0));
+            }
+            LocalDateTime deadline = LocalDateTime.of(deadlineDate, LocalTime.of(deadlineHour.getValue(), 0));
+            Duration estimated = Duration.ofHours(durationSpinner.getValue());
+            controller.createTask(title, descriptionField.getText(), priorityBox.getValue(), deadline, estimated, null, startTime);
+            titleField.clear();
+            descriptionField.clear();
+            refreshList();
+        });
+
+        HBox row1 = new HBox(8, titleField, addBtn);
+        HBox row2 = new HBox(8, descriptionField, priorityBox);
+        HBox row3 = new HBox(8, new Label("开始"), startPicker, startHour,
+                new Label("截止"), deadlinePicker, deadlineHour, new Label("预估h"), durationSpinner);
+        row1.setAlignment(Pos.CENTER_LEFT);
+        row2.setAlignment(Pos.CENTER_LEFT);
+        row3.setAlignment(Pos.CENTER_LEFT);
+        return new VBox(5, row1, row2, row3);
+    }
+
+    private Node buildAssistantBar() {
+        TextField input = new TextField();
+        input.setPromptText("用自然语言快速记录 (例: 这周准备线代期中)");
+        Button parseBtn = new Button("智能拆分");
+        parseBtn.setOnAction(e -> {
+            assistantAPI.addTaskFromNaturalLanguage(input.getText());
+            input.clear();
+            refreshList();
+        });
+        HBox box = new HBox(8, input, parseBtn);
+        HBox.setHgrow(input, javafx.scene.layout.Priority.ALWAYS);
+        return box;
+    }
+
+    private Node buildFooter() {
+        VBox footer = new VBox(5);
+        statsLabel.setText("加载中...");
+        footer.getChildren().add(statsLabel);
+        return footer;
+    }
+
+    private Node buildNowButton() {
+        Button btn = new Button();
+        btn.setOnAction(e -> {
+            Task current = findCurrentTask();
+            if (current != null) {
+                controller.updateStatus(current.getTaskId(), TaskStatus.DOING);
+                statsLabel.setText("已标记正在进行: " + current.getTitle());
+            } else {
+                showAlert("当前没有进行中的任务。");
+            }
+            refreshList();
+        });
+        btn.textProperty().bind(nowTaskButtonLabel.textProperty());
+        btn.setMaxWidth(Double.MAX_VALUE);
+        return btn;
+    }
+
+    private void refreshList() {
+        List<Task> unscheduled = controller.tasksWithoutSchedule();
+        List<Task> scheduled = controller.tasksWithSchedule();
+        unscheduledList.setItems(FXCollections.observableArrayList(unscheduled));
+        updateCalendar(scheduled);
+        long doneToday = controller.doneTodayCount();
+        long highRisk = unscheduled.stream().filter(controller::isHighRisk).count()
+                + scheduled.stream().filter(controller::isHighRisk).count();
+        String base = "今日完成: " + doneToday + " | 高风险: " + highRisk
+                + " | 未排期: " + unscheduled.size() + " | 已排期: " + scheduled.size();
+        statsLabel.setText(base);
+        updateCurrentButton(scheduled);
+        updateWarnings(scheduled);
+        updateUpcomingCard(scheduled, base);
+    }
+
+    private void startAutoRefresh() {
+        if (refreshTimeline != null) {
+            refreshTimeline.stop();
+        }
+        refreshTimeline = new Timeline(new KeyFrame(javafx.util.Duration.seconds(refreshSeconds), e -> refreshList()));
+        refreshTimeline.setCycleCount(Timeline.INDEFINITE);
+        refreshTimeline.play();
+    }
+
+    private void enableDragging(Stage stage, BorderPane pane) {
+        pane.setOnMousePressed(e -> {
+            dragOffsetX = stage.getX() - e.getScreenX();
+            dragOffsetY = stage.getY() - e.getScreenY();
+        });
+        pane.setOnMouseDragged(e -> {
+            stage.setX(e.getScreenX() + dragOffsetX);
+            stage.setY(e.getScreenY() + dragOffsetY);
+        });
+    }
+
+    private void showAlert(String text) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setHeaderText(null);
+        alert.setContentText(text);
+        alert.showAndWait();
+    }
+
+    private class UnscheduledTaskCell extends ListCell<Task> {
+        private final Label title = new Label();
+        private final Label deadline = new Label();
+        private final ComboBox<TaskStatus> statusCombo = new ComboBox<>(FXCollections.observableArrayList(TaskStatus.values()));
+        private final Button editBtn = new Button("Edit");
+        private final Button deleteBtn = new Button("Del");
+
+        UnscheduledTaskCell() {
+            statusCombo.setOnAction(e -> {
+                Task item = getItem();
+                if (item != null && statusCombo.getValue() != null) {
+                    controller.updateStatus(item.getTaskId(), statusCombo.getValue());
+                    refreshList();
+                }
+            });
+            editBtn.setOnAction(e -> {
+                Task item = getItem();
+                if (item != null) {
+                    showEditDialog(item);
+                }
+            });
+            deleteBtn.setOnAction(e -> {
+                Task item = getItem();
+                if (item != null) {
+                    controller.removeTask(item.getTaskId());
+                    refreshList();
+                }
+            });
+            deleteBtn.setTooltip(new Tooltip("删除任务"));
+
+            this.setOnDragDetected(this::onDragDetected);
+            this.setOnDragDone(event -> {
+                draggingTask = null;
+                statsLabel.setText("拖放完成，列表已刷新");
+                refreshList();
+            });
+        }
+
+        private void onDragDetected(MouseEvent event) {
+            Task item = getItem();
+            if (item == null) {
+                return;
+            }
+            draggingTask = item;
+            Dragboard db = startDragAndDrop(TransferMode.MOVE);
+            ClipboardContent content = new ClipboardContent();
+            content.putString(item.getTaskId().toString());
+            db.setContent(content);
+            db.setDragView(snapshot(new SnapshotParameters(), null));
+            event.consume();
+        }
+
+        @Override
+        protected void updateItem(Task item, boolean empty) {
+            super.updateItem(item, empty);
+            if (empty || item == null) {
+                setGraphic(null);
+                setText(null);
+                return;
+            }
+            title.setText(item.getTitle() + " [" + item.getPriority() + "]");
+            title.setStyle("-fx-font-weight: bold;");
+            String deadlineText = item.getDeadline() == null ? "-" : DateTimeUtil.format(item.getDeadline());
+            deadline.setText("截止: " + deadlineText + " • 预计: " + item.getEstimatedTime().toHours() + "h");
+            statusCombo.getSelectionModel().select(item.getStatus());
+            HBox actions = new HBox(6, statusCombo, editBtn, deleteBtn);
+            Region spacer = new Region();
+            HBox row = new HBox(10, new VBox(2, title, deadline), spacer, actions);
+            HBox.setHgrow(spacer, javafx.scene.layout.Priority.ALWAYS);
+            row.setAlignment(Pos.CENTER_LEFT);
+
+            boolean overdue = item.getStatus() == TaskStatus.OVERDUE;
+            boolean highRisk = controller.isHighRisk(item);
+            String bg = overdue ? "#ffe6e6" : highRisk ? "#fff6d9" : "white";
+            row.setStyle("-fx-padding: 6; -fx-background-color: " + bg + "; -fx-border-color: #e0e0e0; -fx-border-radius: 4; -fx-background-radius: 4;");
+            setGraphic(row);
+            setText(null);
+        }
+    }
+
+    private void showEditDialog(Task task) {
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("编辑任务");
+        if (ownerStage != null) {
+            dialog.initOwner(ownerStage);
+            dialog.initModality(Modality.WINDOW_MODAL);
+        }
+        TextField titleField = new TextField(task.getTitle());
+        TextArea descField = new TextArea(task.getDescription());
+        descField.setPrefRowCount(3);
+        ComboBox<TaskStatus> statusBox = new ComboBox<>(FXCollections.observableArrayList(TaskStatus.values()));
+        statusBox.getSelectionModel().select(task.getStatus());
+        ComboBox<Priority> priorityBox = new ComboBox<>(FXCollections.observableArrayList(Priority.values()));
+        priorityBox.getSelectionModel().select(task.getPriority());
+
+        DatePicker startPicker = new DatePicker(task.getStartTime() != null ? task.getStartTime().toLocalDate() : LocalDate.now());
+        Spinner<Integer> startHour = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(0, 23,
+                task.getStartTime() != null ? task.getStartTime().getHour() : 8));
+
+        DatePicker deadlinePicker = new DatePicker(task.getDeadline() != null ? task.getDeadline().toLocalDate() : LocalDate.now());
+        Spinner<Integer> hourSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(0, 23,
+                task.getDeadline() != null ? task.getDeadline().getHour() : 23));
+        Spinner<Integer> estimateSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(1, 48, (int) task.getEstimatedTime().toHours()));
+
+        VBox body = new VBox(8,
+                new HBox(8, new Label("标题"), titleField),
+                new HBox(8, new Label("描述"), descField),
+                new HBox(8, new Label("状态"), statusBox, new Label("优先级"), priorityBox),
+                new HBox(8, new Label("开始"), startPicker, startHour),
+                new HBox(8, new Label("截止"), deadlinePicker, hourSpinner, new Label("预估h"), estimateSpinner)
+        );
+        body.setPadding(new Insets(10));
+        dialog.getDialogPane().setContent(body);
+        dialog.getDialogPane().getButtonTypes().addAll(javafx.scene.control.ButtonType.OK, javafx.scene.control.ButtonType.CANCEL);
+        dialog.setResultConverter(btn -> {
+            if (btn == javafx.scene.control.ButtonType.OK) {
+                LocalDate date = deadlinePicker.getValue();
+                LocalDateTime dl = date != null ? LocalDateTime.of(date, LocalTime.of(hourSpinner.getValue(), 0)) : null;
+                LocalDate startDate = startPicker.getValue();
+                LocalDateTime st = startDate != null ? LocalDateTime.of(startDate, LocalTime.of(startHour.getValue(), 0)) : null;
+                controller.editTask(task.getTaskId(), titleField.getText(), descField.getText(), priorityBox.getValue(),
+                        dl, Duration.ofHours(estimateSpinner.getValue()), null, st);
+                controller.updateStatus(task.getTaskId(), statusBox.getValue());
+                refreshList();
+            }
+            return null;
+        });
+        dialog.showAndWait();
+    }
+
+    private Node buildSplitPane() {
+        Label calLabel = new Label("本周日程视图");
+        ScrollPane calendarScroll = new ScrollPane(calendarBox);
+        calendarScroll.setFitToWidth(false);
+        calendarScroll.setFitToHeight(true);
+        calendarScroll.setPannable(true);
+        calendarScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        calendarScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        double calWidth = axisWidth + 7 * (columnWidth + 8) + 20;
+        calendarScroll.setPrefViewportHeight(dayHeight());
+        calendarScroll.setPrefViewportWidth(calWidth);
+        VBox calendarContainer = new VBox(6, calLabel, calendarScroll);
+        calendarContainer.setPrefWidth(calWidth + 20);
+        VBox.setVgrow(calendarContainer, javafx.scene.layout.Priority.ALWAYS);
+
+        Label rightLabel = new Label("未排期任务（按重要性排序）");
+        unscheduledList.setPrefWidth(300);
+        VBox right = new VBox(6, rightLabel, unscheduledList);
+        VBox.setVgrow(right, javafx.scene.layout.Priority.ALWAYS);
+
+        SplitPane split = new SplitPane(calendarContainer, right);
+        split.setDividerPositions(0.65);
+        split.setPrefHeight(500);
+        return split;
+    }
+
+    private void updateCalendar(List<Task> tasks) {
+        calendarBox.getChildren().clear();
+        double totalHeight = dayHeight();
+        calendarBox.setSpacing(8);
+        double totalWidth = axisWidth + 7 * (columnWidth + 8);
+        calendarBox.setPrefWidth(totalWidth);
+        calendarBox.setMinWidth(totalWidth);
+
+        VBox axisBox = new VBox(4);
+        Label axisHeader = new Label("时间");
+        axisHeader.setStyle("-fx-font-weight: bold;");
+        Pane axisPane = new Pane();
+        axisPane.setPrefHeight(totalHeight);
+        axisPane.setPrefWidth(axisWidth);
+        int[] marks = {4, 8, 12, 16, 20};
+        for (int h : marks) {
+            Label l = new Label(String.format("%02d:00", h));
+            l.setLayoutY(timeToY(LocalTime.of(h, 0)) - 6);
+            axisPane.getChildren().add(l);
+        }
+        axisBox.getChildren().addAll(axisHeader, axisPane);
+        calendarBox.getChildren().add(axisBox);
+
+        LocalDate startDay = weekStart;
+        for (int i = 0; i < 7; i++) {
+            LocalDate day = startDay.plusDays(i);
+            VBox column = new VBox(6);
+            column.setPrefWidth(columnWidth);
+            column.setMinWidth(columnWidth);
+            column.setPadding(new Insets(4));
+            column.setStyle("-fx-border-color: #e0e0e0; -fx-border-width: 1; -fx-background-color: #fafafa;");
+            Label header = new Label(day.getDayOfWeek() + "\n" + day);
+            header.setStyle("-fx-font-size: 11px; -fx-font-weight: bold;");
+
+            List<Task> dayTasks = tasks.stream()
+                    .filter(t -> t.getStartTime() != null && t.getStartTime().toLocalDate().isEqual(day))
+                    .sorted(Comparator.comparing(Task::getStartTime))
+                    .toList();
+
+            Pane blocks = new Pane();
+        blocks.setPrefHeight(totalHeight);
+        blocks.setPrefWidth(columnWidth);
+        blocks.setMinWidth(columnWidth);
+        blocks.setStyle("-fx-background-color: #ffffff;");
+        setupDropHandlers(blocks, day, totalHeight);
+            for (Task t : dayTasks) {
+                blocks.getChildren().add(renderBlock(t, pxPerHour));
+            }
+            addNowLine(blocks, day);
+            column.getChildren().addAll(header, blocks);
+            VBox.setVgrow(blocks, javafx.scene.layout.Priority.ALWAYS);
+            HBox.setHgrow(column, javafx.scene.layout.Priority.NEVER);
+            calendarBox.getChildren().add(column);
+        }
+    }
+
+    private Node renderBlock(Task task, double pxPerHour) {
+        String color = priorityColor(task.getPriority());
+        Label block = new Label(task.getTitle() + "\n" + timeRange(task));
+        block.setWrapText(true);
+        block.setStyle("-fx-background-color: " + color + "; -fx-background-radius: 6; -fx-padding: 6; -fx-text-fill: #0f0f0f; -fx-font-size: 11px;");
+        block.setMinHeight(40);
+        double blockWidth = columnWidth - 12;
+        block.setPrefWidth(blockWidth);
+        block.setMinWidth(blockWidth);
+        block.setMaxWidth(blockWidth);
+
+        LocalDateTime start = task.getStartTime();
+        Duration duration = task.getEstimatedTime() != null ? task.getEstimatedTime() : Duration.ofHours(1);
+        double height = durationHeight(start, duration);
+        double offset = start != null ? timeToY(start.toLocalTime()) : 0;
+        block.setPrefHeight(height);
+        block.setLayoutY(offset);
+        block.setMaxWidth(blockWidth);
+        if (start != null) {
+            LocalDateTime end = start.plus(duration);
+            LocalDateTime now = LocalDateTime.now();
+            if (!now.isBefore(start) && now.isBefore(end)) {
+                block.setStyle(block.getStyle() + "-fx-border-color: #2e6cf6; -fx-border-width: 2;");
+            } else if (now.isAfter(end)) {
+                block.setStyle(block.getStyle() + "-fx-opacity: 0.5;");
+            }
+            if (end.isAfter(task.getDeadline() != null ? task.getDeadline() : end)) {
+                block.setStyle(block.getStyle() + "-fx-border-color: red;");
+            }
+        }
+        if (task.getPostponeCount() > 0) {
+            block.setText("! " + block.getText());
+            block.setStyle(block.getStyle() + "-fx-text-fill: #b30000;");
+        }
+        block.setOnMouseClicked(e -> {
+            if (e.getButton().name().equals("PRIMARY")) {
+                showEditDialog(task);
+            }
+        });
+        block.setOnDragDetected(e -> {
+            if (!e.isSecondaryButtonDown()) return;
+            draggingTask = task;
+            Dragboard db = block.startDragAndDrop(TransferMode.MOVE);
+            ClipboardContent content = new ClipboardContent();
+            content.putString(task.getTaskId().toString());
+            db.setContent(content);
+            db.setDragView(block.snapshot(new SnapshotParameters(), null));
+            e.consume();
+        });
+        return block;
+    }
+
+    private String timeRange(Task task) {
+        LocalDateTime start = task.getStartTime();
+        if (start == null) {
+            return "未设置时间";
+        }
+        Duration duration = safeDuration(task);
+        LocalDateTime end = start.plus(duration);
+        return start.toLocalTime().truncatedTo(ChronoUnit.MINUTES) + " - " + end.toLocalTime().truncatedTo(ChronoUnit.MINUTES);
+    }
+
+    private String priorityColor(Priority priority) {
+        Map<Priority, String> map = new EnumMap<>(Priority.class);
+        map.put(Priority.CRITICAL, "#ff9aa2");
+        map.put(Priority.HIGH, "#ffdac1");
+        map.put(Priority.MEDIUM, "#e2f0cb");
+        map.put(Priority.LOW, "#c7ceea");
+        return map.getOrDefault(priority, "#e2f0cb");
+    }
+
+    private void setupDropHandlers(Pane pane, LocalDate day, double totalHeight) {
+        pane.setOnDragOver(event -> {
+            if (draggingTask != null && event.getGestureSource() != pane && event.getDragboard().hasString()) {
+                event.acceptTransferModes(TransferMode.MOVE);
+                double y = clamp(event.getY(), 0, totalHeight);
+                LocalTime snapped = snapToSlot(y);
+                statsLabel.setText("拖放到 " + day + " " + snapped);
+            }
+            event.consume();
+        });
+        pane.setOnDragDropped(event -> {
+            Dragboard db = event.getDragboard();
+            boolean success = false;
+            if (db.hasString()) {
+                Task task = draggingTask != null ? draggingTask : findTaskById(db.getString());
+                if (task != null) {
+                    double y = clamp(event.getY(), 0, totalHeight);
+                    LocalTime snapped = snapToSlot(y);
+                    LocalDateTime start = LocalDateTime.of(day, snapped);
+                    LocalDateTime oldStart = task.getStartTime();
+                    boolean delayed = oldStart != null && start.isAfter(oldStart);
+                    if (delayed) {
+                        task.incrementPostponeCount();
+                    }
+                    controller.editTask(task.getTaskId(), null, null, null, task.getDeadline(), task.getEstimatedTime(), task.getCourseId(), start);
+                    success = true;
+                    refreshList();
+                }
+            }
+            event.setDropCompleted(success);
+            event.consume();
+        });
+    }
+
+    private LocalTime snapToSlot(double y) {
+        return yToTime(y);
+    }
+
+    private double clamp(double val, double min, double max) {
+        return Math.max(min, Math.min(max, val));
+    }
+
+    private Task findTaskById(String id) {
+        try {
+            UUID uuid = UUID.fromString(id);
+            for (Task t : unscheduledList.getItems()) {
+                if (uuid.equals(t.getTaskId())) {
+                    return t;
+                }
+            }
+            for (Task t : controller.tasksWithSchedule()) {
+                if (uuid.equals(t.getTaskId())) {
+                    return t;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private double compressedMorningHeight() {
+        return 8 * pxPerHour * morningCompress;
+    }
+
+    private double dayHeight() {
+        return compressedMorningHeight() + 16 * pxPerHour;
+    }
+
+    private double timeToY(LocalTime time) {
+        double hour = time.getHour() + time.getMinute() / 60.0;
+        if (hour <= 8) {
+            return hour * pxPerHour * morningCompress;
+        }
+        return compressedMorningHeight() + (hour - 8) * pxPerHour;
+    }
+
+    private LocalTime yToTime(double y) {
+        double morningH = compressedMorningHeight();
+        double hours;
+        if (y <= morningH) {
+            hours = y / (pxPerHour * morningCompress);
+        } else {
+            hours = 8 + (y - morningH) / pxPerHour;
+        }
+        hours = Math.max(0, Math.min(23.99, hours));
+        int halfSlots = (int) Math.round(hours * 2);
+        int totalMinutes = Math.min(23 * 60 + 30, halfSlots * 30);
+        return LocalTime.of(totalMinutes / 60, totalMinutes % 60);
+    }
+
+    private double durationHeight(LocalDateTime start, Duration duration) {
+        if (start == null) {
+            return 40;
+        }
+        LocalDateTime end = start.plus(duration != null ? duration : Duration.ofHours(1));
+        if (!end.toLocalDate().isEqual(start.toLocalDate())) {
+            end = start.toLocalDate().atTime(23, 59);
+        }
+        double h = timeToY(end.toLocalTime()) - timeToY(start.toLocalTime());
+        return Math.max(40, h);
+    }
+
+    private void addNowLine(Pane pane, LocalDate day) {
+        LocalDateTime now = LocalDateTime.now();
+        if (!now.toLocalDate().isEqual(day)) {
+            return;
+        }
+        double y = timeToY(now.toLocalTime());
+        Region line = new Region();
+        line.setStyle("-fx-background-color: #2e6cf6;");
+        line.setPrefHeight(2);
+        line.setPrefWidth(Double.MAX_VALUE);
+        line.setLayoutY(y);
+        pane.getChildren().add(line);
+    }
+
+    private Task findCurrentTask() {
+        LocalDateTime now = LocalDateTime.now();
+        for (Task t : controller.tasksWithSchedule()) {
+            LocalDateTime start = t.getStartTime();
+            Duration duration = safeDuration(t);
+            if (start != null && !now.isBefore(start) && now.isBefore(start.plus(duration))) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    private void updateCurrentButton(List<Task> scheduled) {
+        Task current = findCurrentTask();
+        if (current != null) {
+            nowTaskButtonLabel.setText("你在完成【" + current.getTitle() + "】吗？");
+        } else {
+            nowTaskButtonLabel.setText("当前没有进行中的任务，点击提示为空");
+        }
+    }
+
+    private void updateWarnings(List<Task> scheduled) {
+        boolean hasOverrun = scheduled.stream().anyMatch(t -> {
+            if (t.getStartTime() == null || t.getDeadline() == null || t.getEstimatedTime() == null) return false;
+            return t.getStartTime().plus(safeDuration(t)).isAfter(t.getDeadline());
+        });
+        warningLabel.setText(hasOverrun ? "警报：存在任务预计结束时间超过截止时间！" : "");
+    }
+
+    private void updateUpcomingCard(List<Task> scheduled, String base) {
+        LocalDateTime now = LocalDateTime.now();
+        Task next = scheduled.stream()
+                .filter(t -> t.getStartTime() != null && t.getStartTime().isAfter(now))
+                .min(Comparator.comparing(Task::getStartTime))
+                .orElse(null);
+        if (next == null) {
+            statsLabel.setText(base + " | 下一任务：无");
+            return;
+        }
+        Duration until = Duration.between(now, next.getStartTime());
+        String info = String.format("下一项：%s (优先级:%s) 距开始 %d分", next.getTitle(), next.getPriority(), until.toMinutes());
+        if (next.getStartTime().plus(safeDuration(next)).isBefore(now)) {
+            info += " [已过期]";
+        }
+        statsLabel.setText(base + " | " + info);
+    }
+
+    private Duration safeDuration(Task task) {
+        return task.getEstimatedTime() != null ? task.getEstimatedTime() : Duration.ofHours(1);
+    }
+
+    private void showSettingsDialog() {
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("设置");
+        if (ownerStage != null) {
+            dialog.initOwner(ownerStage);
+            dialog.initModality(Modality.WINDOW_MODAL);
+        }
+
+        Spinner<Integer> pxSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(12, 80, (int) pxPerHour));
+        Spinner<Integer> refreshSpinner = new Spinner<>(new SpinnerValueFactory.IntegerSpinnerValueFactory(10, 300, refreshSeconds));
+        Button resetBtn = new Button("清空数据");
+        resetBtn.setOnAction(e -> {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "确认清空所有数据并重置？", ButtonType.OK, ButtonType.CANCEL);
+            confirm.initOwner(dialog.getDialogPane().getScene().getWindow());
+            confirm.showAndWait().ifPresent(res -> {
+                if (res == ButtonType.OK) {
+                    controller.resetAll();
+                    refreshList();
+                }
+            });
+        });
+
+        VBox body = new VBox(10,
+                new HBox(8, new Label("每小时像素"), pxSpinner),
+                new HBox(8, new Label("刷新间隔(秒)"), refreshSpinner),
+                new Separator(),
+                resetBtn
+        );
+        body.setPadding(new Insets(10));
+        dialog.getDialogPane().setContent(body);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.setResultConverter(btn -> {
+            if (btn == ButtonType.OK) {
+                pxPerHour = pxSpinner.getValue();
+                refreshSeconds = refreshSpinner.getValue();
+                startAutoRefresh();
+                refreshList();
+            }
+            return null;
+        });
+        dialog.showAndWait();
+    }
+}
+
