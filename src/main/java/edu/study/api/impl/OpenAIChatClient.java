@@ -97,6 +97,7 @@ public class OpenAIChatClient implements ChatClient {
             sb.append(list);
         }
         sb.append("\n如果用户请求创建/修改任务，请返回以\"SET:\"开头的自然语言任务描述（中文），不要返回其它内容。");
+        sb.append("\n如果用户请求编写或生成 Java 工具/小程序，请返回的内容以\"CODE:\"开头，紧跟文件名（如 Demo.java），并提供完整 Java 源码，可使用 ```java ... ``` 包裹。必须包含 main 方法。示例: CODE: Demo.java```java public class Demo { public static void main(String[] args){ System.out.println(\"hi\"); } }```");
         return sb.toString();
     }
 

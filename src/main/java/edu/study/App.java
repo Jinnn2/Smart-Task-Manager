@@ -38,7 +38,6 @@ public class App extends Application {
         SmartTaskWidget widget = new SmartTaskWidget(taskController, assistantAPI, chatClient);
         Scene scene = new Scene(widget.build(stage));
         stage.setTitle("Smart Study Task Manager");
-        stage.setAlwaysOnTop(true);
         stage.setScene(scene);
         stage.sizeToScene();
         stage.show();

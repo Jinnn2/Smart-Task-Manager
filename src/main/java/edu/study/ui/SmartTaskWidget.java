@@ -17,6 +17,11 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.nio.file.Paths;
+import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
@@ -24,6 +29,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.io.IOException;
+import java.io.PrintWriter;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.collections.FXCollections;
@@ -60,6 +67,7 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.application.Platform;
 
 public class SmartTaskWidget {
     private final TaskController controller;
@@ -84,6 +92,7 @@ public class SmartTaskWidget {
     private final double rightPanelWidth = 320;
     private final PersonalProfile profile = new PersonalProfile();
     private final ExecutorService llmExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService codeExecutor = Executors.newCachedThreadPool();
     private final ToolSandboxRunner sandboxRunner = new ToolSandboxRunner(Paths.get(System.getProperty("user.dir"), "Tools"));
     private VBox sandboxPane;
     private javafx.scene.control.ListView<String> jarListView;
@@ -111,7 +120,8 @@ public class SmartTaskWidget {
         sandboxPane = new VBox();
         sandboxPane.setVisible(false);
         sandboxPane.setManaged(false);
-        sandboxPane.setPrefWidth(280);
+        sandboxPane.setPrefWidth(320);
+        sandboxPane.setMaxHeight(Double.MAX_VALUE);
 
         VBox mainContent = new VBox(10, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar(), buildChatPane());
         mainContent.setPadding(new Insets(10));
@@ -124,6 +134,7 @@ public class SmartTaskWidget {
 
         HBox container = new HBox(10, mainContent, sandboxPane);
         HBox.setHgrow(mainContent, javafx.scene.layout.Priority.ALWAYS);
+        HBox.setHgrow(sandboxPane, javafx.scene.layout.Priority.NEVER);
         wrapper.setCenter(container);
         wrapper.setBottom(buildFooter());
 
@@ -773,6 +784,17 @@ public class SmartTaskWidget {
                                 assistantAPI.addTaskFromNaturalLanguage(nl);
                                 refreshList();
                                 chatHistory.appendText("助手: 已根据指令创建/更新任务。\n");
+                            } else if (r.trim().toUpperCase().contains("CODE:") || r.contains("```")) {
+                                chatHistory.appendText("助手: 收到代码生成请求，正在构建...\n");
+                                appendSandboxLog("[code] 收到回复，准备处理。长度=" + r.length());
+                                try {
+                                    appendSandboxLog("[code] before handleCodeResponse (同步执行调试)");
+                                    handleCodeResponse(r, chatHistory);
+                                    appendSandboxLog("[code] handleCodeResponse end");
+                                } catch (Throwable ex) {
+                                    appendSandboxLog("[code] handleCodeResponse 异常: " + ex.getMessage());
+                                    appendSandboxLog(getStackTrace(ex));
+                                }
                             } else {
                                 chatHistory.appendText("助手: " + r + "\n");
                             }
@@ -796,7 +818,7 @@ public class SmartTaskWidget {
         if (!visible) {
             sandboxPane.setPrefWidth(0);
         } else {
-            sandboxPane.setPrefWidth(280);
+            sandboxPane.setPrefWidth(320);
         }
         if (visible) {
             refreshSandboxList();
@@ -809,7 +831,7 @@ public class SmartTaskWidget {
 
         jarListView = new ListView<>();
         jarListView.setStyle("-fx-control-inner-background: #000000; -fx-text-fill: #e0e0e0;");
-        jarListView.setPrefHeight(140);
+        jarListView.setPrefHeight(160);
 
         Button refresh = new Button("刷新");
         refresh.setOnAction(e -> refreshSandboxList());
@@ -830,6 +852,7 @@ public class SmartTaskWidget {
         sandboxLog.setWrapText(true);
         sandboxLog.setPrefHeight(140);
         sandboxLog.setStyle("-fx-control-inner-background: #000000; -fx-text-fill: #00ff66; -fx-font-family: Consolas, monospace;");
+        VBox.setVgrow(sandboxLog, javafx.scene.layout.Priority.ALWAYS);
 
         VBox box = new VBox(8, title, jarListView, actions, sandboxLog);
         box.setStyle("-fx-background-color: #000000; -fx-padding: 8;");
@@ -843,8 +866,169 @@ public class SmartTaskWidget {
     }
 
     private void appendSandboxLog(String line) {
-        if (sandboxLog != null) {
-            sandboxLog.appendText(line + "\n");
+        System.err.println("[sandbox] " + line);
+        logToFile(line);
+        Platform.runLater(() -> {
+            if (sandboxLog != null) {
+                sandboxLog.appendText(line + "\n");
+            }
+        });
+    }
+
+    private void handleCodeResponse(String response, TextArea chatHistory) {
+        appendSandboxLog("\nIN\n");
+        try {
+            appendSandboxLog("[code] handleCodeResponse start");
+            System.err.println("[sandbox] handleCodeResponse start (thread=" + Thread.currentThread().getName() + ")");
+            logToFile("[code-file] entered handleCodeResponse thread=" + Thread.currentThread().getName());
+            int idx = response.toUpperCase().indexOf("CODE:");
+            String body = idx >= 0 ? response.substring(idx + "CODE:".length()).trim() : response.trim();
+            appendSandboxLog("[code] body preview: " + body.substring(0, Math.min(80, body.length())).replaceAll("\\s+", " "));
+            String code = extractCode(body);
+            if (code == null || code.isBlank()) {
+                appendSandboxLog("[code] code parse failed/empty");
+                javafx.application.Platform.runLater(() -> chatHistory.appendText("助手: 代码内容为空，已忽略。\n"));
+                return;
+            }
+            String fileName = extractFileName(body);
+            String className = extractClassName(code);
+            if (className == null) {
+                className = "GeneratedTool" + System.currentTimeMillis();
+                appendSandboxLog("[code] className fallback: " + className);
+            }
+            if (fileName == null || fileName.isBlank()) {
+                fileName = className + ".java";
+                appendSandboxLog("[code] fileName fallback: " + fileName);
+            }
+            final String finalClassName = className;
+            final String finalFileName = fileName;
+            Path toolsDir = Paths.get(System.getProperty("user.dir"), "Tools");
+            Files.createDirectories(toolsDir);
+            Path javaFile = toolsDir.resolve(fileName);
+            Files.writeString(javaFile, code, StandardCharsets.UTF_8);
+            appendSandboxLog("[code] 写入源码: " + javaFile.getFileName());
+
+            StringBuilder log = new StringBuilder();
+            int compileExit = runProcess(log, toolsDir, resolveTool("javac"), "-encoding", "UTF-8", javaFile.getFileName().toString());
+            if (compileExit != 0) {
+                Path corrupt = toolsDir.resolve(finalClassName + ".corrupt");
+                Files.writeString(corrupt, "Compile failed:\n" + log, StandardCharsets.UTF_8);
+                final Path corruptPath = corrupt;
+                final String logText = log.toString();
+                javafx.application.Platform.runLater(() -> {
+                    appendSandboxLog("[code] 编译失败，已标记为损坏: " + corruptPath.getFileName());
+                    appendSandboxLog(logText);
+                    chatHistory.appendText("助手: 代码编译失败，已标记损坏。\n");
+                });
+                return;
+            }
+            appendSandboxLog("[code] 编译成功: " + javaFile.getFileName());
+            int jarExit = runProcess(log, toolsDir, resolveTool("jar"), "cfe", finalClassName + ".jar", finalClassName, finalClassName + ".class");
+            if (jarExit != 0) {
+                Path corrupt = toolsDir.resolve(finalClassName + ".corrupt");
+                Files.writeString(corrupt, "Jar failed:\n" + log, StandardCharsets.UTF_8);
+                final Path corruptPath = corrupt;
+                final String logText = log.toString();
+                javafx.application.Platform.runLater(() -> {
+                    appendSandboxLog("[code] 打包失败，已标记为损坏: " + corruptPath.getFileName());
+                    appendSandboxLog(logText);
+                    chatHistory.appendText("助手: 代码打包失败，已标记损坏。\n");
+                });
+                return;
+            }
+            final String logText = log.toString();
+            javafx.application.Platform.runLater(() -> {
+                appendSandboxLog("[code] 生成完成: " + finalClassName + ".jar");
+                if (!logText.isEmpty()) {
+                    appendSandboxLog(logText);
+                }
+                chatHistory.appendText("助手: 代码已生成并打包，可在沙盒列表中运行 " + finalClassName + ".jar\n");
+                refreshSandboxList();
+            });
+        } catch (Throwable ex) {
+            javafx.application.Platform.runLater(() -> {
+                appendSandboxLog("[code] 异常: " + ex.getMessage());
+                chatHistory.appendText("助手: 处理代码时出现异常。\n");
+            });
+            appendSandboxLog("[code] 异常堆栈:\n" + getStackTrace(ex));
+        }
+    }
+
+    private String extractCode(String body) {
+        if (body.contains("```")) {
+            int first = body.indexOf("```");
+            int last = body.lastIndexOf("```");
+            if (last > first + 3) {
+                String inside = body.substring(first + 3, last).trim();
+                if (inside.startsWith("java")) {
+                    inside = inside.substring(4).trim();
+                }
+                return inside;
+            }
+        }
+        return body;
+    }
+
+    private String resolveTool(String tool) {
+        Path javaHome = Paths.get(System.getProperty("java.home"));
+        Path candidate = javaHome.resolve("bin").resolve(tool + (isWindows() ? ".exe" : ""));
+        if (Files.exists(candidate)) {
+            return candidate.toString();
+        }
+        return tool;
+    }
+
+    private boolean isWindows() {
+        return System.getProperty("os.name").toLowerCase().contains("win");
+    }
+
+    private String extractFileName(String body) {
+        String firstLine = body.split("\\R", 2)[0].trim();
+        if (firstLine.toLowerCase().endsWith(".java")) {
+            return firstLine;
+        }
+        return null;
+    }
+
+    private String extractClassName(String code) {
+        Pattern p = Pattern.compile("class\\s+(\\w+)");
+        Matcher m = p.matcher(code);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
+    }
+
+    private int runProcess(StringBuilder log, Path dir, String... cmd) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.directory(dir.toFile());
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                log.append(line).append("\n");
+            }
+        }
+        return p.waitFor();
+    }
+
+    private String getStackTrace(Throwable t) {
+        java.io.StringWriter sw = new java.io.StringWriter();
+        java.io.PrintWriter pw = new java.io.PrintWriter(sw);
+        t.printStackTrace(pw);
+        return sw.toString();
+    }
+
+    private void logToFile(String msg) {
+        try {
+            Path logDir = Paths.get(System.getProperty("user.dir"), "logs");
+            Files.createDirectories(logDir);
+            Path logFile = logDir.resolve("code-debug.log");
+            try (PrintWriter pw = new PrintWriter(Files.newBufferedWriter(logFile, StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND))) {
+                pw.println(java.time.LocalDateTime.now() + " " + msg);
+            }
+        } catch (IOException ignored) {
         }
     }
 
@@ -941,6 +1125,7 @@ public class SmartTaskWidget {
             refreshTimeline.stop();
         }
         llmExecutor.shutdownNow();
+        codeExecutor.shutdownNow();
         saveSettings();
     }
 }
