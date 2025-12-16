@@ -91,6 +91,8 @@ public class SmartTaskWidget {
     private final double axisWidth = 60;
     private final double morningCompress = 0.25;// 0-8 点压缩比例
     private final double rightPanelWidth = 320;
+    private final double daySpanHours = 26; // 展示 26 小时高度
+    private final double morningLimitHour = 8;
     private final PersonalProfile profile = new PersonalProfile();
     private final ExecutorService llmExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService codeExecutor = Executors.newCachedThreadPool();
@@ -126,12 +128,12 @@ public class SmartTaskWidget {
         sandboxPane.setPrefWidth(320);
         sandboxPane.setMaxHeight(Double.MAX_VALUE);
 
-        VBox mainContent = new VBox(10, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar(), buildChatPane());
-        mainContent.setPadding(new Insets(10));
+        VBox mainContent = new VBox(12, buildHeader(stage), buildNowButton(), warningLabel, buildForm(), buildSplitPane(), buildAssistantBar(), buildChatPane());
+        mainContent.setPadding(new Insets(16, 18, 16, 18));
         VBox.setVgrow(calendarBox, javafx.scene.layout.Priority.ALWAYS);
         VBox.setVgrow(unscheduledList, javafx.scene.layout.Priority.ALWAYS);
         double totalWidth = axisWidth + 7 * (columnWidth + 8) + rightPanelWidth + 60;
-        double totalHeight = dayHeight() + 300;
+        double totalHeight = dayHeight() + 420;
         mainContent.setPrefWidth(totalWidth);
         mainContent.setPrefHeight(totalHeight);
 
@@ -454,18 +456,20 @@ public class SmartTaskWidget {
         double calWidth = axisWidth + 7 * (columnWidth + 8) + 20;
         calendarScroll.setPrefViewportHeight(dayHeight());
         calendarScroll.setPrefViewportWidth(calWidth);
-        VBox calendarContainer = new VBox(6, calLabel, calendarScroll);
-        calendarContainer.setPrefWidth(calWidth + 20);
+        VBox calendarContainer = new VBox(10, calLabel, calendarScroll);
+        calendarContainer.setPrefWidth(calWidth + 40);
+        calendarContainer.setPadding(new Insets(10, 20, 10, 10));
         VBox.setVgrow(calendarContainer, javafx.scene.layout.Priority.ALWAYS);
 
         Label rightLabel = new Label("未排期任务（按重要性排序）");
-        unscheduledList.setPrefWidth(300);
-        VBox right = new VBox(6, rightLabel, unscheduledList);
+        unscheduledList.setPrefWidth(320);
+        VBox right = new VBox(10, rightLabel, unscheduledList);
+        right.setPadding(new Insets(10, 10, 10, 10));
         VBox.setVgrow(right, javafx.scene.layout.Priority.ALWAYS);
 
         SplitPane split = new SplitPane(calendarContainer, right);
-        split.setDividerPositions(0.65);
-        split.setPrefHeight(500);
+        split.setDividerPositions(0.62);
+        split.setPrefHeight(620);
         return split;
     }
 
@@ -483,10 +487,10 @@ public class SmartTaskWidget {
         Pane axisPane = new Pane();
         axisPane.setPrefHeight(totalHeight);
         axisPane.setPrefWidth(axisWidth);
-        int[] marks = {4, 8, 12, 16, 20};
+        int[] marks = {4, 8, 12, 16, 20, 24};
         for (int h : marks) {
             Label l = new Label(String.format("%02d:00", h));
-            l.setLayoutY(timeToY(LocalTime.of(h, 0)) - 6);
+            l.setLayoutY(hourToY(h) - 6);
             axisPane.getChildren().add(l);
         }
         axisBox.getChildren().addAll(axisHeader, axisPane);
@@ -556,8 +560,8 @@ public class SmartTaskWidget {
             }
         }
         if (task.getPostponeCount() > 0) {
-            block.setText("! " + block.getText());
-            block.setStyle(block.getStyle() + "-fx-text-fill: #b30000;");
+            block.setText("【已推迟×" + task.getPostponeCount() + "】\n" + block.getText());
+            block.setStyle(block.getStyle() + "-fx-text-fill: #b30000; -fx-border-color: #ff6666; -fx-border-width: 2;");
         }
         block.setOnMouseClicked(e -> {
             if (e.getButton().name().equals("PRIMARY")) {
@@ -657,19 +661,23 @@ public class SmartTaskWidget {
     }
 
     private double compressedMorningHeight() {
-        return 8 * pxPerHour * morningCompress;
+        return morningLimitHour * pxPerHour * morningCompress;
     }
 
     private double dayHeight() {
-        return compressedMorningHeight() + 16 * pxPerHour;
+        return compressedMorningHeight() + (daySpanHours - morningLimitHour) * pxPerHour;
+    }
+
+    private double hourToY(double hour) {
+        if (hour <= morningLimitHour) {
+            return hour * pxPerHour * morningCompress;
+        }
+        return compressedMorningHeight() + (hour - morningLimitHour) * pxPerHour;
     }
 
     private double timeToY(LocalTime time) {
         double hour = time.getHour() + time.getMinute() / 60.0;
-        if (hour <= 8) {
-            return hour * pxPerHour * morningCompress;
-        }
-        return compressedMorningHeight() + (hour - 8) * pxPerHour;
+        return hourToY(hour);
     }
 
     private LocalTime yToTime(double y) {
@@ -678,11 +686,12 @@ public class SmartTaskWidget {
         if (y <= morningH) {
             hours = y / (pxPerHour * morningCompress);
         } else {
-            hours = 8 + (y - morningH) / pxPerHour;
+            hours = morningLimitHour + (y - morningH) / pxPerHour;
         }
-        hours = Math.max(0, Math.min(23.99, hours));
+        hours = Math.max(0, Math.min(daySpanHours - 0.01, hours));
         int halfSlots = (int) Math.round(hours * 2);
-        int totalMinutes = Math.min(23 * 60 + 30, halfSlots * 30);
+        int maxMinutes = 23 * 60 + 59;
+        int totalMinutes = Math.min(maxMinutes, halfSlots * 30);
         return LocalTime.of(totalMinutes / 60, totalMinutes % 60);
     }
 
