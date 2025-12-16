@@ -102,6 +102,7 @@ public class SmartTaskWidget {
     private javafx.scene.control.TextArea sandboxLog;
     private javafx.scene.control.TextArea chatContext;
     private final List<String> chatTurns = new ArrayList<>();
+    private final List<String> memories = new ArrayList<>();
 
     public SmartTaskWidget(TaskController controller, AssistantAPI assistantAPI, ChatClient chatClient) {
         this.controller = controller;
@@ -531,9 +532,11 @@ public class SmartTaskWidget {
 
     private Node renderBlock(Task task, double pxPerHour) {
         String color = priorityColor(task.getPriority());
-        Label block = new Label(task.getTitle() + "\n" + timeRange(task));
+        StringBuilder textBuilder = new StringBuilder();
+        textBuilder.append(task.getTitle()).append("\n").append(timeRange(task));
+        Label block = new Label(textBuilder.toString());
         block.setWrapText(true);
-        block.setStyle("-fx-background-color: " + color + "; -fx-background-radius: 6; -fx-padding: 6; -fx-text-fill: #0f0f0f; -fx-font-size: 11px;");
+        block.setStyle("-fx-background-color: " + color + "; -fx-background-radius: 6; -fx-padding: 6; -fx-text-fill: #0f0f0f; -fx-font-size: 10px;");
         block.setMinHeight(40);
         double blockWidth = columnWidth - 12;
         block.setPrefWidth(blockWidth);
@@ -560,7 +563,7 @@ public class SmartTaskWidget {
             }
         }
         if (task.getPostponeCount() > 0) {
-            block.setText("【已推迟×" + task.getPostponeCount() + "】\n" + block.getText());
+            block.setText(block.getText() + "\n【已推迟×" + task.getPostponeCount() + "】");
             block.setStyle(block.getStyle() + "-fx-text-fill: #b30000; -fx-border-color: #ff6666; -fx-border-width: 2;");
         }
         block.setOnMouseClicked(e -> {
@@ -743,11 +746,15 @@ public class SmartTaskWidget {
     }
 
     private void updateWarnings(List<Task> scheduled) {
-        boolean hasOverrun = scheduled.stream().anyMatch(t -> {
+        List<String> overrun = scheduled.stream().filter(t -> {
             if (t.getStartTime() == null || t.getDeadline() == null || t.getEstimatedTime() == null) return false;
             return t.getStartTime().plus(safeDuration(t)).isAfter(t.getDeadline());
-        });
-        warningLabel.setText(hasOverrun ? "警报：存在任务预计结束时间超过截止时间！" : "");
+        }).map(Task::getTitle).toList();
+        if (overrun.isEmpty()) {
+            warningLabel.setText("");
+        } else {
+            warningLabel.setText("警报：预期超deadline的任务 -> " + String.join("，", overrun));
+        }
     }
 
     private void updateUpcomingCard(List<Task> scheduled, String base) {
@@ -803,18 +810,27 @@ public class SmartTaskWidget {
                 String promptWithContext = buildChatPromptWithContext(msg);
                 chatClient.chat(promptWithContext, all, profile).ifPresentOrElse(
                         r -> javafx.application.Platform.runLater(() -> {
-                            if (r.startsWith("SET:")) {
-                                String nl = r.substring(4).trim();
+                            String reply = r;
+                            List<String> saved = extractSaves(reply);
+                            if (!saved.isEmpty()) {
+                                saved.forEach(this::addMemory);
+                                chatHistory.appendText("助手: 已保存记忆 " + saved.size() + " 条。\n");
+                                appendChatTurn("助手", "已保存记忆 " + saved.size() + " 条。");
+                                reply = removeSaveLines(reply);
+                                updateChatContext();
+                            }
+                            if (reply.startsWith("SET:")) {
+                                String nl = reply.substring(4).trim();
                                 assistantAPI.addTaskFromNaturalLanguage(nl);
                                 refreshList();
                                 chatHistory.appendText("助手: 已根据指令创建/更新任务。\n");
                                 appendChatTurn("助手", "已根据指令创建/更新任务。");
-                            } else if (r.trim().toUpperCase().contains("CODE:") || r.contains("```")) {
+                            } else if (reply.trim().toUpperCase().contains("CODE:") || reply.contains("```")) {
                                 chatHistory.appendText("助手: 收到代码生成请求，正在构建...\n");
-                                appendSandboxLog("[code] 收到回复，准备处理。长度=" + r.length());
+                                appendSandboxLog("[code] 收到回复，准备处理。长度=" + reply.length());
                                 try {
                                     appendSandboxLog("[code] before handleCodeResponse (同步执行调试)");
-                                    handleCodeResponse(r, chatHistory);
+                                    handleCodeResponse(reply, chatHistory);
                                     appendSandboxLog("[code] handleCodeResponse end");
                                 } catch (Throwable ex) {
                                     appendSandboxLog("[code] handleCodeResponse 异常: " + ex.getMessage());
@@ -822,8 +838,8 @@ public class SmartTaskWidget {
                                 }
                                 appendChatTurn("助手", "已返回代码内容，正在构建。");
                             } else {
-                                chatHistory.appendText("助手: " + r + "\n");
-                                appendChatTurn("助手", r);
+                                chatHistory.appendText("助手: " + reply + "\n");
+                                appendChatTurn("助手", reply);
                             }
                         }),
                         () -> javafx.application.Platform.runLater(() -> chatHistory.appendText("助手: 未找到相关任务或指令。\n"))
@@ -966,7 +982,20 @@ public class SmartTaskWidget {
                 return;
             }
             appendSandboxLog("[code] 编译成功: " + javaFile.getFileName());
-            int jarExit = runProcess(log, toolsDir, resolveTool("jar"), "cfe", finalClassName + ".jar", finalClassName, finalClassName + ".class");
+            List<String> classFiles = Files.list(toolsDir)
+                    .filter(p -> p.getFileName().toString().startsWith(finalClassName) && p.getFileName().toString().endsWith(".class"))
+                    .map(p -> p.getFileName().toString())
+                    .toList();
+            if (classFiles.isEmpty()) {
+                classFiles = List.of(finalClassName + ".class");
+            }
+            List<String> jarCmd = new ArrayList<>();
+            jarCmd.add(resolveTool("jar"));
+            jarCmd.add("cfe");
+            jarCmd.add(finalClassName + ".jar");
+            jarCmd.add(finalClassName);
+            jarCmd.addAll(classFiles);
+            int jarExit = runProcess(log, toolsDir, jarCmd.toArray(new String[0]));
             if (jarExit != 0) {
                 Path corrupt = toolsDir.resolve(finalClassName + ".corrupt");
                 Files.writeString(corrupt, "Jar failed:\n" + log, StandardCharsets.UTF_8);
@@ -1104,7 +1133,7 @@ public class SmartTaskWidget {
         } else {
             sb.append(" | 下一任务: 无");
         }
-        sb.append("\n对话轮次: ").append(chatTurns.size());
+        sb.append("\n对话轮次: ").append(chatTurns.size()).append(" | 记忆: ").append(memories.size());
         return sb.toString();
     }
 
@@ -1128,6 +1157,42 @@ public class SmartTaskWidget {
         return sb.toString();
     }
 
+    private List<String> extractSaves(String text) {
+        List<String> saves = new ArrayList<>();
+        if (text == null) return saves;
+        String[] lines = text.split("\\R");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.toUpperCase().startsWith("SAVE:")) {
+                String content = trimmed.substring(5).trim();
+                if (!content.isEmpty()) {
+                    saves.add(content);
+                }
+            }
+        }
+        return saves;
+    }
+
+    private String removeSaveLines(String text) {
+        if (text == null) return "";
+        StringBuilder sb = new StringBuilder();
+        String[] lines = text.split("\\R");
+        for (String line : lines) {
+            if (line.trim().toUpperCase().startsWith("SAVE:")) continue;
+            if (!line.isBlank()) {
+                sb.append(line).append("\n");
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    private void addMemory(String mem) {
+        if (mem == null || mem.isBlank()) return;
+        memories.add(mem.trim());
+        saveSettings();
+        updateChatContext();
+    }
+
     private void showSettingsDialog() {
         Dialog<Void> dialog = new Dialog<>();
         dialog.setTitle("设置");
@@ -1143,6 +1208,15 @@ public class SmartTaskWidget {
         TextField goalField = new TextField(profile.getGoal());
         TextArea noteArea = new TextArea(profile.getNote());
         noteArea.setPrefRowCount(3);
+        TextArea memoryArea = new TextArea(String.join("\n", memories));
+        memoryArea.setEditable(false);
+        memoryArea.setWrapText(true);
+        memoryArea.setPrefRowCount(6);
+        Button clearMemBtn = new Button("清空记忆");
+        clearMemBtn.setOnAction(e -> {
+            memories.clear();
+            memoryArea.clear();
+        });
         Button resetBtn = new Button("清空数据");
         resetBtn.setOnAction(e -> {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "确认清空所有数据并重置？", ButtonType.OK, ButtonType.CANCEL);
@@ -1161,6 +1235,7 @@ public class SmartTaskWidget {
                 new HBox(8, new Label("姓名"), nameField, new Label("专业"), majorField),
                 new HBox(8, new Label("目标"), goalField),
                 new VBox(4, new Label("备注"), noteArea),
+                new VBox(4, new Label("记忆区（保存的SAVE内容，只读）"), memoryArea, clearMemBtn),
                 new Separator(),
                 resetBtn
         );
@@ -1200,6 +1275,10 @@ public class SmartTaskWidget {
                 profile.setGoal(p.getGoal());
                 profile.setNote(p.getNote());
             }
+            if (cfg.getMemories() != null) {
+                memories.clear();
+                memories.addAll(cfg.getMemories());
+            }
         }
     }
 
@@ -1213,6 +1292,7 @@ public class SmartTaskWidget {
         copy.setGoal(profile.getGoal());
         copy.setNote(profile.getNote());
         cfg.setProfile(copy);
+        cfg.setMemories(new ArrayList<>(memories));
         SettingsStore.save(cfg);
     }
 

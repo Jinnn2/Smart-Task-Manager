@@ -4,6 +4,7 @@ public class SettingsConfig {
     private double pxPerHour = 24;
     private int refreshSeconds = 45;
     private PersonalProfile profile = new PersonalProfile();
+    private java.util.List<String> memories = new java.util.ArrayList<>();
 
     public double getPxPerHour() {
         return pxPerHour;
@@ -27,5 +28,13 @@ public class SettingsConfig {
 
     public void setProfile(PersonalProfile profile) {
         this.profile = profile;
+    }
+
+    public java.util.List<String> getMemories() {
+        return memories;
+    }
+
+    public void setMemories(java.util.List<String> memories) {
+        this.memories = memories;
     }
 }

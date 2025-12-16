@@ -64,12 +64,21 @@ public class OpenAIChatAssistantAPI implements AssistantAPI {
         if (input == null || input.isBlank()) {
             return;
         }
-        String prompt = "You are a study task planner. From the description below, produce a JSON array of tasks. "
-                + "JSON schema: [{\"title\": string, \"description\": string, \"priority\": one of [LOW,MEDIUM,HIGH,CRITICAL], "
-                + "\"estimatedHours\": number (>=1), \"deadline\": ISO_LOCAL_DATE_TIME or ISO_LOCAL_DATE, "
-                + "\"daysUntilDeadline\": integer (>=0, fallback if deadline missing)}]. "
-                + "Return JSON first; notes (if any) go after JSON. "
-                + "Description: \"" + input + "\"";
+        String prompt = "You are a study task planner. From the description below, produce a JSON array of tasks.\n"
+                + "Strict JSON schema for each item:\n"
+                + "{\n"
+                + "  \"title\": string,\n"
+                + "  \"description\": string,\n"
+                + "  \"priority\": one of [LOW, MEDIUM, HIGH, CRITICAL],\n"
+                + "  \"estimatedHours\": number (>=1, can be decimal),\n"
+                + "  \"deadline\": ISO_LOCAL_DATE_TIME or ISO_LOCAL_DATE,\n"
+                + "  \"daysUntilDeadline\": integer (>=0, used ONLY if deadline is missing)\n"
+                + "}\n"
+                + "Rules:\n"
+                + "- Always include priority and estimatedHours; do not omit or null them.\n"
+                + "- Prefer exact deadlines; if none in user text, set daysUntilDeadline.\n"
+                + "- Keep the JSON concise; place JSON as the first content; any notes after JSON.\n"
+                + "User description: \"" + input + "\"";
         Optional<String> result = callLLM(prompt, 3000);
         if (result.isEmpty()) {
             fallback.addTaskFromNaturalLanguage(input);
@@ -211,10 +220,19 @@ public class OpenAIChatAssistantAPI implements AssistantAPI {
     }
 
     private int parseInt(Object value, int defaultValue) {
+        if (value == null) return defaultValue;
         try {
+            if (value instanceof Number) {
+                return (int) Math.max(0, Math.round(((Number) value).doubleValue()));
+            }
             return Integer.parseInt(value.toString());
         } catch (Exception e) {
-            return defaultValue;
+            try {
+                double d = Double.parseDouble(value.toString());
+                return (int) Math.max(0, Math.round(d));
+            } catch (Exception ex) {
+                return defaultValue;
+            }
         }
     }
 

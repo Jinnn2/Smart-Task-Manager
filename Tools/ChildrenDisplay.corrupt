@@ -1,0 +1,74 @@
+Compile failed:
+ChildrenDisplay.java:1: ����: �����javafx.application������
+import javafx.application.Application;
+                         ^
+ChildrenDisplay.java:2: ����: �����javafx.scene������
+import javafx.scene.Scene;
+                   ^
+ChildrenDisplay.java:3: ����: �����javafx.scene.control������
+import javafx.scene.control.Label;
+                           ^
+ChildrenDisplay.java:4: ����: �����javafx.scene.layout������
+import javafx.scene.layout.VBox;
+                          ^
+ChildrenDisplay.java:5: ����: �����javafx.stage������
+import javafx.stage.Stage;
+                   ^
+ChildrenDisplay.java:7: ����: �Ҳ�������
+public class ChildrenDisplay extends Application {
+                                     ^
+  ����: �� Application
+ChildrenDisplay.java:13: ����: �Ҳ�������
+    public void start(Stage primaryStage) {
+                      ^
+  ����:   �� Stage
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:9: ����: �Ҳ�������
+        launch(args);
+        ^
+  ����:   ���� launch(String[])
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:12: ����: �������Ḳ�ǻ�ʵ�ֳ����͵ķ���
+    @Override
+    ^
+ChildrenDisplay.java:16: ����: �Ҳ�������
+        Label child1 = new Label("����: ����ǫ");
+        ^
+  ����:   �� Label
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:16: ����: �Ҳ�������
+        Label child1 = new Label("����: ����ǫ");
+                           ^
+  ����:   �� Label
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:17: ����: �Ҳ�������
+        Label child2 = new Label("Ů��: ������");
+        ^
+  ����:   �� Label
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:17: ����: �Ҳ�������
+        Label child2 = new Label("Ů��: ������");
+                           ^
+  ����:   �� Label
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:19: ����: �Ҳ�������
+        VBox vbox = new VBox(child1, child2);
+        ^
+  ����:   �� VBox
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:19: ����: �Ҳ�������
+        VBox vbox = new VBox(child1, child2);
+                        ^
+  ����:   �� VBox
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:21: ����: �Ҳ�������
+        Scene scene = new Scene(vbox, 200, 100);
+        ^
+  ����:   �� Scene
+  λ��: �� ChildrenDisplay
+ChildrenDisplay.java:21: ����: �Ҳ�������
+        Scene scene = new Scene(vbox, 200, 100);
+                          ^
+  ����:   �� Scene
+  λ��: �� ChildrenDisplay
+17 ������
