@@ -68,6 +68,7 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
 import javafx.application.Platform;
+import java.util.ArrayList;
 
 public class SmartTaskWidget {
     private final TaskController controller;
@@ -97,6 +98,8 @@ public class SmartTaskWidget {
     private VBox sandboxPane;
     private javafx.scene.control.ListView<String> jarListView;
     private javafx.scene.control.TextArea sandboxLog;
+    private javafx.scene.control.TextArea chatContext;
+    private final List<String> chatTurns = new ArrayList<>();
 
     public SmartTaskWidget(TaskController controller, AssistantAPI assistantAPI, ChatClient chatClient) {
         this.controller = controller;
@@ -141,6 +144,7 @@ public class SmartTaskWidget {
         refreshList();
         startAutoRefresh();
         enableDragging(stage, wrapper);
+        updateChatContext();
         return wrapper;
     }
 
@@ -279,6 +283,7 @@ public class SmartTaskWidget {
         updateCurrentButton(scheduled);
         updateWarnings(scheduled);
         updateUpcomingCard(scheduled, base);
+        updateChatContext();
     }
 
     private void startAutoRefresh() {
@@ -760,30 +765,41 @@ public class SmartTaskWidget {
 
     private Node buildChatPane() {
         Label chatLabel = new Label("与个人助手聊天");
+        chatContext = new TextArea();
+        chatContext.setEditable(false);
+        chatContext.setWrapText(true);
+        chatContext.setPrefRowCount(3);
+        chatContext.setStyle("-fx-control-inner-background: #f7f7f7;");
+        chatContext.setText(buildChatContextText());
         TextArea chatHistory = new TextArea();
         chatHistory.setEditable(false);
         chatHistory.setWrapText(true);
         chatHistory.setPrefHeight(150);
 
-        TextField chatInput = new TextField();
+        TextArea chatInput = new TextArea();
         chatInput.setPromptText("输入想聊的内容，例如：帮我规划明天的学习安排");
+        chatInput.setWrapText(true);
+        chatInput.setPrefRowCount(2);
         Button send = new Button("发送");
-        send.setOnAction(e -> {
+        Runnable sendAction = () -> {
             String msg = chatInput.getText();
             if (msg == null || msg.isBlank()) {
                 return;
             }
             chatHistory.appendText("你：" + msg + "\n");
+            appendChatTurn("用户", msg);
             chatInput.clear();
             List<Task> all = controller.listTasks();
             llmExecutor.submit(() -> {
-                chatClient.chat(msg, all, profile).ifPresentOrElse(
+                String promptWithContext = buildChatPromptWithContext(msg);
+                chatClient.chat(promptWithContext, all, profile).ifPresentOrElse(
                         r -> javafx.application.Platform.runLater(() -> {
                             if (r.startsWith("SET:")) {
                                 String nl = r.substring(4).trim();
                                 assistantAPI.addTaskFromNaturalLanguage(nl);
                                 refreshList();
                                 chatHistory.appendText("助手: 已根据指令创建/更新任务。\n");
+                                appendChatTurn("助手", "已根据指令创建/更新任务。");
                             } else if (r.trim().toUpperCase().contains("CODE:") || r.contains("```")) {
                                 chatHistory.appendText("助手: 收到代码生成请求，正在构建...\n");
                                 appendSandboxLog("[code] 收到回复，准备处理。长度=" + r.length());
@@ -795,17 +811,35 @@ public class SmartTaskWidget {
                                     appendSandboxLog("[code] handleCodeResponse 异常: " + ex.getMessage());
                                     appendSandboxLog(getStackTrace(ex));
                                 }
+                                appendChatTurn("助手", "已返回代码内容，正在构建。");
                             } else {
                                 chatHistory.appendText("助手: " + r + "\n");
+                                appendChatTurn("助手", r);
                             }
                         }),
                         () -> javafx.application.Platform.runLater(() -> chatHistory.appendText("助手: 未找到相关任务或指令。\n"))
                 );
             });
+        };
+        send.setOnAction(e -> sendAction.run());
+        chatInput.setOnKeyPressed(e -> {
+            switch (e.getCode()) {
+                case ENTER -> {
+                    if (e.isShiftDown()) {
+                        chatInput.appendText(System.lineSeparator());
+                        e.consume();
+                    } else {
+                        e.consume();
+                        sendAction.run();
+                    }
+                }
+                default -> {
+                }
+            }
         });
         HBox inputRow = new HBox(8, chatInput, send);
         HBox.setHgrow(chatInput, javafx.scene.layout.Priority.ALWAYS);
-        return new VBox(6, chatLabel, chatHistory, inputRow);
+        return new VBox(6, chatLabel, chatContext, chatHistory, inputRow);
     }
 
     private void toggleSandbox() {
@@ -1030,6 +1064,59 @@ public class SmartTaskWidget {
             }
         } catch (IOException ignored) {
         }
+    }
+
+    private void updateChatContext() {
+        if (chatContext == null) return;
+        chatContext.setText(buildChatContextText());
+    }
+
+    private String buildChatContextText() {
+        StringBuilder sb = new StringBuilder();
+        if (profile != null) {
+            sb.append("个人信息：");
+            if (profile.getName() != null) sb.append("姓名=").append(profile.getName()).append(" ");
+            if (profile.getMajor() != null) sb.append("专业=").append(profile.getMajor()).append(" ");
+            if (profile.getGoal() != null) sb.append("目标=").append(profile.getGoal()).append(" ");
+            sb.append("\n");
+        }
+        List<Task> tasks = controller.tasksWithSchedule();
+        LocalDateTime now = LocalDateTime.now();
+        Task next = tasks.stream()
+                .filter(t -> t.getStartTime() != null && t.getStartTime().isAfter(now))
+                .min(Comparator.comparing(Task::getStartTime))
+                .orElse(null);
+        long unscheduled = controller.tasksWithoutSchedule().size();
+        sb.append("未排期: ").append(unscheduled);
+        if (next != null) {
+            sb.append(" | 下一任务: ").append(next.getTitle())
+                    .append(" @ ").append(next.getStartTime())
+                    .append(" (").append(next.getPriority()).append(")");
+        } else {
+            sb.append(" | 下一任务: 无");
+        }
+        sb.append("\n对话轮次: ").append(chatTurns.size());
+        return sb.toString();
+    }
+
+    private void appendChatTurn(String role, String text) {
+        chatTurns.add(role + ": " + text);
+        while (chatTurns.size() > 12) {
+            chatTurns.remove(0);
+        }
+        updateChatContext();
+    }
+
+    private String buildChatPromptWithContext(String userMessage) {
+        StringBuilder sb = new StringBuilder();
+        if (!chatTurns.isEmpty()) {
+            sb.append("以下是最近的对话片段，请结合上下文回答：\n");
+            for (String turn : chatTurns) {
+                sb.append(turn).append("\n");
+            }
+        }
+        sb.append("用户: ").append(userMessage);
+        return sb.toString();
     }
 
     private void showSettingsDialog() {
