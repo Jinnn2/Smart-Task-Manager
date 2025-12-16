@@ -9,24 +9,29 @@ The system combines a **drag-and-drop weekly calendar**, **risk-aware task analy
 ## ✨ Key Features
 
 ### 📅 Visual Scheduling
+<img width="1900" height="702" alt="image" src="https://github.com/user-attachments/assets/6f177969-5360-403e-9470-5d6c327783f3" />
 
 * Weekly calendar with **compressed morning view (00:00–08:00)** and a **26-hour vertical span**
 * Drag-and-drop task scheduling with **30-minute snapping**
 * Real-time current-time indicator and clear 24:00 boundary
 
 ### 🧠 Task Modeling
+<img width="791" height="367" alt="image" src="https://github.com/user-attachments/assets/c4358994-a394-4413-84e0-0632f37dee08" />
 
 * Task attributes: priority, deadline, estimated duration, optional start time
 * Automatic overdue detection and status update
 * Postponement tracking (e.g. *“已推迟 × N”*)
 
 ### ⚠️ Risk & Analytics
+<img width="919" height="154" alt="image" src="https://github.com/user-attachments/assets/d012bcda-c81d-4141-ba77-be5f437c7ca2" />
 
 * High-risk task detection
 * Upcoming-deadline highlighting
 * Warning when scheduled end time exceeds deadline
 
 ### 💬 Natural-Language Assistant
+<img width="1815" height="382" alt="image" src="https://github.com/user-attachments/assets/db0a88d0-da3b-4046-b68a-c2b04c862d43" />
+<img width="707" height="347" alt="image" src="https://github.com/user-attachments/assets/fe221aad-1d22-4073-bc1c-a087ea3ffb5b" />
 
 * **SET mode**: create or update tasks via natural language
 * **CODE mode**: generate runnable Java tools (full source code required)
@@ -36,6 +41,7 @@ The system combines a **drag-and-drop weekly calendar**, **risk-aware task analy
   * `Shift + Enter` for newline
 
 ### 🧪 Local Tool Sandbox
+<img width="305" height="515" alt="image" src="https://github.com/user-attachments/assets/f7ef6207-09b0-4690-b041-bd39b9f954f5" />
 
 * Run any executable **JAR** placed under `Tools/`
 * Supports both CLI and GUI applications
@@ -124,6 +130,7 @@ OPENAI_MODEL=gpt-4o
 ```
 
 ### Assistant Behavior
+<img width="669" height="456" alt="image" src="https://github.com/user-attachments/assets/766168d6-d3ff-4381-a261-ab36d625318f" />
 
 * **Task operations** → return `SET:` followed by natural-language task description
 * **Code generation** → return `CODE:` + `FileName.java` + complete Java source
