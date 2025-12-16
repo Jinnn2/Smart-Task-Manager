@@ -184,6 +184,5 @@ If no LLM is available, the system falls back to a **rule-based assistant**.
 
 MIT License
 (Adjust as needed)
-
-
-我可以按你的目标继续细化。
+## Author
+Jinnn2 金厚泽 北京航空航天大学
